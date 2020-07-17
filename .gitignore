@@ -4,6 +4,7 @@
 
 # Mac/OSX
 .DS_Store
+results/
 
 # Windows
 Thumbs.db
