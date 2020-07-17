@@ -94,14 +94,14 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
         )
 
         self.dynamics_encoded_state_network = FullyConnectedNetwork(
-            encoding_size + self.action_space_size, fc_dynamics_layers, encoding_size
+            encoding_size + 1, fc_dynamics_layers, encoding_size
         )
         self.dynamics_reward_network = FullyConnectedNetwork(
             encoding_size, fc_reward_layers, self.full_support_size,
         )
 
         self.prediction_policy_network = FullyConnectedNetwork(
-            encoding_size, fc_policy_layers, self.action_space_size
+            encoding_size, fc_policy_layers, 2
         )
         self.prediction_value_network = FullyConnectedNetwork(
             encoding_size, fc_value_layers, self.full_support_size,
@@ -128,13 +128,7 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
 
     def dynamics(self, encoded_state, action):
         # Stack encoded_state with a game specific one hot encoded action (See paper appendix Network Architecture)
-        action_one_hot = (
-            torch.zeros((action.shape[0], self.action_space_size))
-            .to(action.device)
-            .float()
-        )
-        action_one_hot.scatter_(1, action.long(), 1.0)
-        x = torch.cat((encoded_state, action_one_hot), dim=1)
+        x = torch.cat((encoded_state, action), dim=1)
 
         next_encoded_state = self.dynamics_encoded_state_network(x)
 
@@ -303,23 +297,25 @@ class DynamicsNetwork(torch.nn.Module):
         fc_reward_layers,
         full_support_size,
         block_output_size_reward,
+        action_dim=2,
     ):
         super().__init__()
-        self.conv = conv3x3(num_channels, num_channels - 1)
-        self.bn = torch.nn.BatchNorm2d(num_channels - 1)
+        self.conv = conv3x3(num_channels, num_channels)
+        self.bn = torch.nn.BatchNorm2d(num_channels)
         self.resblocks = torch.nn.ModuleList(
-            [ResidualBlock(num_channels - 1) for _ in range(num_blocks)]
+            [ResidualBlock(num_channels) for _ in range(num_blocks)]
         )
 
-        self.conv1x1_reward = torch.nn.Conv2d(num_channels - 1, reduced_channels_reward, 1)
+        self.conv1x1_reward = torch.nn.Conv2d(num_channels, reduced_channels_reward, 1)
         self.block_output_size_reward = block_output_size_reward
+        self.fc_action = torch.nn.Linear(action_dim, block_output_size_reward)
         self.fc = FullyConnectedNetwork(
-            self.block_output_size_reward,
+            self.block_output_size_reward * 2,
             fc_reward_layers,
             full_support_size,
         )
 
-    def forward(self, x):
+    def forward(self, x, action):
         out = self.conv(x)
         out = self.bn(out)
         out = torch.nn.functional.relu(out)
@@ -328,6 +324,8 @@ class DynamicsNetwork(torch.nn.Module):
         state = out
         out = self.conv1x1_reward(out)
         out = out.view(-1, self.block_output_size_reward)
+        out_action = self.fc_action(action)
+        out = torch.cat((out, out_action), dim=1)
         reward = self.fc(out)
         return state, reward
 
@@ -437,7 +435,7 @@ class MuZeroResidualNetwork(AbstractNetwork):
 
         self.dynamics_network = DynamicsNetwork(
             num_blocks,
-            num_channels + 1,
+            num_channels,
             reduced_channels_reward,
             fc_reward_layers,
             self.full_support_size,
@@ -445,7 +443,7 @@ class MuZeroResidualNetwork(AbstractNetwork):
         )
 
         self.prediction_network = PredictionNetwork(
-            action_space_size,
+            action_space_size * 2,
             num_blocks,
             num_channels,
             reduced_channels_value,
@@ -492,23 +490,7 @@ class MuZeroResidualNetwork(AbstractNetwork):
 
     def dynamics(self, encoded_state, action):
         # Stack encoded_state with a game specific one hot encoded action (See paper appendix Network Architecture)
-        action_one_hot = (
-            torch.ones(
-                (
-                    encoded_state.shape[0],
-                    1,
-                    encoded_state.shape[2],
-                    encoded_state.shape[3],
-                )
-            )
-            .to(action.device)
-            .float()
-        )
-        action_one_hot = (
-            action[:, :, None, None] * action_one_hot / self.action_space_size
-        )
-        x = torch.cat((encoded_state, action_one_hot), dim=1)
-        next_encoded_state, reward = self.dynamics_network(x)
+        next_encoded_state, reward = self.dynamics_network(encoded_state, action)
 
         # Scale encoded state between [0, 1] (See paper appendix Training)
         min_next_encoded_state = (
@@ -632,3 +614,18 @@ def scalar_to_support(x, support_size):
     indexes = indexes.masked_fill_(2 * support_size < indexes, 0.0)
     logits.scatter_(2, indexes.long().unsqueeze(-1), prob.unsqueeze(-1))
     return logits
+
+def sample_action(mu, sigma):
+    mu = torch.tanh(mu)
+    sigma = torch.exp(sigma)
+
+    m = torch.distributions.normal.Normal(mu, sigma)
+    return m.sample()
+
+def get_log_prob(mu, sigma, action):
+    mu = torch.tanh(mu)
+    sigma = torch.exp(sigma)
+
+    m = torch.distributions.normal.Normal(mu, sigma)
+    log_prob = m.log_prob(action)
+    return log_prob

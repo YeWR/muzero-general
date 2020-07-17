@@ -60,7 +60,7 @@ class MuZero:
 
         # Initialize workers
         training_worker = trainer.Trainer.options(
-            num_gpus=1 if "cuda" in self.config.training_device else 0
+            num_gpus=4 if "cuda" in self.config.training_device else 0
         ).remote(copy.deepcopy(self.muzero_weights), self.config)
         shared_storage_worker = shared_storage.SharedStorage.remote(
             copy.deepcopy(self.muzero_weights), self.game_name, self.config,
